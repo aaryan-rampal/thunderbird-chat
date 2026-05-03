@@ -1,5 +1,18 @@
 const BACKEND_URL = "http://127.0.0.1:8765/bridge/events";
 
+function partSummary(part) {
+  if (!part) {
+    return null;
+  }
+
+  return {
+    content_type: part.contentType || "",
+    has_body: typeof part.body === "string" && part.body.length > 0,
+    body_length: typeof part.body === "string" ? part.body.length : 0,
+    part_count: Array.isArray(part.parts) ? part.parts.length : 0,
+  };
+}
+
 function textFromPart(part) {
   if (!part) {
     return "";
@@ -27,15 +40,23 @@ function accountId(message) {
 }
 
 function selectedMessagePayload(message, fullMessage) {
+  const bodyText = textFromPart(fullMessage);
+
   return {
     type: "selected_message",
+    bridge: {
+      version: "0.1.0",
+      source: "browser_action",
+      body_text_length: bodyText.length,
+      body_part_summary: partSummary(fullMessage),
+    },
     message: {
       thunderbird_id: message.id,
       subject: message.subject || "",
       author: message.author || "",
       recipients: message.recipients || [],
       date: message.date ? new Date(message.date).toISOString() : "",
-      body_text: textFromPart(fullMessage),
+      body_text: bodyText,
       folder_path: folderPath(message),
       account_id: accountId(message),
     },
@@ -57,18 +78,27 @@ async function selectedMessage() {
     throw new Error("No selected message found.");
   }
 
-  return message;
+  return {
+    tabId: activeTab.id,
+    message,
+    selectedCount: selected.messages.length,
+  };
 }
 
 async function sendSelectedMessage() {
-  const message = await selectedMessage();
+  const selection = await selectedMessage();
+  const message = selection.message;
   const fullMessage = await messenger.messages.getFull(message.id);
+  const payload = selectedMessagePayload(message, fullMessage);
+  payload.bridge.tab_id = selection.tabId;
+  payload.bridge.selected_count = selection.selectedCount;
+
   const response = await fetch(BACKEND_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(selectedMessagePayload(message, fullMessage)),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {

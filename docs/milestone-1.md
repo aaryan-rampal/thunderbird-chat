@@ -22,5 +22,7 @@ WebSocket command channels, or an extension polling loop. Those are later choice
 1. Start the backend on `127.0.0.1:8765`.
 2. Load the Thunderbird extension temporarily.
 3. Select one email and click the extension action.
-4. Open `http://127.0.0.1:8765/messages`.
-5. Confirm the selected email appears.
+4. Open `http://127.0.0.1:8765/bridge/events/latest`.
+5. Confirm the raw bridge payload and message summary look right.
+6. Open `http://127.0.0.1:8765/messages`.
+7. Confirm the selected email appears in the normalized message list.

@@ -13,6 +13,16 @@ source .venv/bin/activate
 uvicorn thunderbird_ai_api.app:app --app-dir apps/api/src --reload --port 8765
 ```
 
+## Bridge Debugging
+
+After clicking the Thunderbird bridge action, inspect what the backend received:
+
+```sh
+curl http://127.0.0.1:8765/bridge/events/latest
+curl http://127.0.0.1:8765/bridge/events
+curl http://127.0.0.1:8765/messages
+```
+
 ## Verification
 
 ```sh
