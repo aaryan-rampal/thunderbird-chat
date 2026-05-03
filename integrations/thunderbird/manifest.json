@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "Thunderbird AI Bridge",
+  "version": "0.1.0",
+  "description": "Sends selected Thunderbird messages to the local Thunderbird AI backend.",
+  "applications": {
+    "gecko": {
+      "id": "bridge@thunderbird-ai.local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": [
+    "accountsRead",
+    "messagesRead",
+    "activeTab",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "browser_action": {
+    "default_title": "Send selected email to Thunderbird AI"
+  }
+}
