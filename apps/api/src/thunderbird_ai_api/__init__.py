@@ -1,2 +1,1 @@
 """Thunderbird AI backend package."""
-
