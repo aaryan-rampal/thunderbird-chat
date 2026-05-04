@@ -5,14 +5,20 @@ them in-memory, and exposes debug views for inspection.
 """
 
 import logging
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
+from thunderbird_ai_api.index_store import MailboxIndexStore
+
 BRIDGE_ORIGIN_REGEX = r"^moz-extension://.*$"
+DEFAULT_INDEX_DB_PATH = Path("data/thunderbird_ai.sqlite")
+INDEX_DB_PATH_ENV = "THUNDERBIRD_AI_DB_PATH"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -83,6 +89,68 @@ class MessageList(BaseModel):
     """Container for exposing all captured messages."""
 
     messages: list[BridgeMessage]
+
+
+class IndexRunCreated(BaseModel):
+    """Response payload for a newly created index run."""
+
+    run_id: str
+
+
+class IndexBatchAccepted(BaseModel):
+    """Response payload for accepted message observation batches."""
+
+    accepted: int
+
+
+class IndexFolderObservation(BaseModel):
+    """Folder traversal observation sent by the Thunderbird extension."""
+
+    account_id: str
+    folder_id: str
+    folder_path: str
+    folder_name: str
+    folder_special_use: list[str] = Field(default_factory=list)
+    is_unified: bool = False
+    is_virtual: bool = False
+    is_tag: bool = False
+    included: bool = True
+    message_count_seen: int = Field(ge=0)
+    error: dict[str, Any] | None = None
+
+
+class IndexMessageObservation(BaseModel):
+    """Message observation sent by the Thunderbird extension during indexing."""
+
+    runtime_message_id: int = Field(ge=1)
+    message_id: str | None = None
+    account_id: str
+    folder_id: str
+    folder_path: str
+    folder_name: str
+    folder_special_use: list[str] = Field(default_factory=list)
+    is_unified: bool = False
+    is_virtual: bool = False
+    is_tag: bool = False
+    subject: str
+    author: str
+    recipients: list[str] = Field(default_factory=list)
+    date: str
+    body_text: str
+    headers: dict[str, Any] = Field(default_factory=dict)
+    error: dict[str, Any] | None = None
+
+
+class IndexMessageBatch(BaseModel):
+    """Batch of message observations for one index run."""
+
+    messages: list[IndexMessageObservation]
+
+
+class IndexRunFailure(BaseModel):
+    """Failure context for an index run."""
+
+    error: dict[str, Any]
 
 
 class MessageStore:
@@ -186,11 +254,136 @@ def log_observed_bridge_event(event: ObservedBridgeEvent) -> None:
     )
 
 
-def create_app(store: MessageStore | None = None) -> FastAPI:
+def default_index_db_path() -> Path:
+    """Return the configured default SQLite index database path."""
+    configured = os.environ.get(INDEX_DB_PATH_ENV)
+    if configured:
+        return Path(configured)
+    return DEFAULT_INDEX_DB_PATH
+
+
+def no_store(response: Response) -> None:
+    """Mark a debug response as uncacheable."""
+    response.headers["Cache-Control"] = "no-store"
+
+
+def register_index_routes(
+    app: FastAPI,
+    index_store: MailboxIndexStore | None,
+) -> None:
+    """Register SQLite mailbox index endpoints on the FastAPI app.
+
+    Args:
+        app: Application receiving routes.
+        index_store: Optional injected store for tests. When omitted, the store
+            is created lazily from the configured runtime path.
+    """
+    store_holder: dict[str, MailboxIndexStore] = {}
+
+    def get_index_store() -> MailboxIndexStore:
+        if index_store is not None:
+            return index_store
+        if "store" not in store_holder:
+            store_holder["store"] = MailboxIndexStore(default_index_db_path())
+        return store_holder["store"]
+
+    @app.post("/index/runs", status_code=status.HTTP_201_CREATED)
+    def start_index_run() -> IndexRunCreated:
+        """Create a new mailbox index run."""
+        return IndexRunCreated(run_id=get_index_store().start_run())
+
+    @app.post("/index/runs/{run_id}/folders", status_code=status.HTTP_202_ACCEPTED)
+    def record_index_folder(run_id: str, folder: IndexFolderObservation) -> dict[str, bool]:
+        """Record one folder observation for an index run."""
+        get_index_store().record_folder(run_id, folder.model_dump(mode="json"))
+        return {"accepted": True}
+
+    @app.post("/index/runs/{run_id}/messages:batch", status_code=status.HTTP_202_ACCEPTED)
+    def accept_index_message_batch(
+        run_id: str,
+        batch: IndexMessageBatch,
+    ) -> IndexBatchAccepted:
+        """Accept a batch of message observations for an index run."""
+        accepted = get_index_store().ingest_messages(
+            run_id,
+            [message.model_dump(mode="json") for message in batch.messages],
+        )
+        return IndexBatchAccepted(accepted=accepted)
+
+    @app.post("/index/runs/{run_id}/finish")
+    def finish_index_run(run_id: str) -> dict[str, Any]:
+        """Complete an index run and return its summary."""
+        return get_index_store().finish_run(run_id)
+
+    @app.post("/index/runs/{run_id}/fail")
+    def fail_index_run(run_id: str, failure: IndexRunFailure) -> dict[str, Any]:
+        """Mark an index run failed and return its summary."""
+        return get_index_store().fail_run(run_id, failure.error)
+
+    @app.get("/index/runs/latest")
+    def latest_index_run(response: Response) -> dict[str, Any]:
+        """Return the latest index run summary."""
+        no_store(response)
+        summary = get_index_store().latest_run_summary()
+        if summary is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No index runs have been created.",
+            )
+        return summary
+
+    @app.get("/index/runs/{run_id}")
+    def get_index_run(run_id: str, response: Response) -> dict[str, Any]:
+        """Return one index run summary."""
+        no_store(response)
+        summary = get_index_store().get_run_summary(run_id)
+        if summary is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Index run not found.",
+            )
+        return summary
+
+    @app.get("/index/messages/{canonical_key}")
+    def get_index_message(canonical_key: str, response: Response) -> dict[str, Any]:
+        """Return canonical message details for one indexed key."""
+        no_store(response)
+        try:
+            return get_index_store().get_message(canonical_key)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Indexed message not found.",
+            ) from error
+
+    @app.get("/index/locations/inactive")
+    def list_inactive_index_locations(response: Response) -> dict[str, Any]:
+        """Return inactive message locations."""
+        no_store(response)
+        return {"locations": get_index_store().list_inactive_locations()}
+
+    @app.get("/index/duplicates")
+    def list_index_duplicates(response: Response) -> dict[str, Any]:
+        """Return canonical messages with multiple active locations."""
+        no_store(response)
+        return {"duplicates": get_index_store().list_duplicates()}
+
+    @app.get("/index/folder-errors")
+    def list_index_folder_errors(response: Response) -> dict[str, Any]:
+        """Return folder traversal errors from index runs."""
+        no_store(response)
+        return {"errors": get_index_store().list_folder_errors()}
+
+
+def create_app(
+    store: MessageStore | None = None,
+    index_store: MailboxIndexStore | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI app for the Thunderbird bridge.
 
     Args:
         store: Optional pre-configured message store used for tests or custom use.
+        index_store: Optional SQLite mailbox index store used for tests or runtime.
 
     Returns:
         Configured FastAPI application.
@@ -242,9 +435,10 @@ def create_app(store: MessageStore | None = None) -> FastAPI:
     @app.get("/messages")
     def list_messages(response: Response) -> MessageList:
         """Return all received messages."""
-        response.headers["Cache-Control"] = "no-store"
+        no_store(response)
         return MessageList(messages=message_store.list_messages())
 
+    register_index_routes(app, index_store)
     return app
 
 

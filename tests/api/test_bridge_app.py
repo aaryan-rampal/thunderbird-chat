@@ -138,9 +138,7 @@ def test_bridge_allows_thunderbird_extension_preflight() -> None:
     )
 
     assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == (
-        "moz-extension://temporary-addon-id"
-    )
+    assert response.headers["access-control-allow-origin"] == ("moz-extension://temporary-addon-id")
     assert "POST" in response.headers["access-control-allow-methods"]
 
 
