@@ -314,6 +314,86 @@ def test_key_probe_normalizes_message_id_angle_brackets() -> None:
     assert summary["message_id_mismatch_count"] == 0
 
 
+def test_key_probe_exposes_folder_classification_summary() -> None:
+    client = TestClient(create_app())
+    run = {
+        "source": "manual_key_probe",
+        "limit_per_folder": 10,
+        "observations": [
+            {
+                "runtime_message_id": 101,
+                "header_message_id": "<real@example.com>",
+                "full_headers_message_id": "<real@example.com>",
+                "subject": "Real inbox",
+                "author": "Registrar <registrar@example.com>",
+                "recipients": ["aaryan@example.com"],
+                "date": "2022-07-22T10:30:00Z",
+                "size": 4096,
+                "folder_id": "real-inbox",
+                "folder_path": "/Inbox",
+                "account_id": "account1",
+                "folder_is_unified": False,
+                "folder_is_virtual": False,
+                "folder_is_tag": False,
+                "folder_special_use": ["inbox"],
+                "read": True,
+                "tags": [],
+                "flagged": False,
+                "body_text_hash": "body-hash-1",
+            },
+            {
+                "runtime_message_id": 102,
+                "header_message_id": "<all@example.com>",
+                "full_headers_message_id": "<all@example.com>",
+                "subject": "All inbox",
+                "author": "Registrar <registrar@example.com>",
+                "recipients": ["aaryan@example.com"],
+                "date": "2022-07-22T10:30:00Z",
+                "size": 4096,
+                "folder_id": "all-inbox",
+                "folder_path": "/All Inboxes",
+                "account_id": "account1",
+                "folder_is_unified": True,
+                "folder_is_virtual": True,
+                "folder_is_tag": False,
+                "folder_special_use": ["inbox"],
+                "read": True,
+                "tags": [],
+                "flagged": False,
+                "body_text_hash": "body-hash-2",
+            },
+        ],
+    }
+    assert client.post("/eda/key-probe/runs", json=run).status_code == 202
+
+    folders = client.get("/eda/key-probe/runs/latest/folders").json()["folders"]
+
+    assert folders == [
+        {
+            "account_id": "account1",
+            "folder_id": "all-inbox",
+            "folder_path": "/All Inboxes",
+            "folder_is_unified": True,
+            "folder_is_virtual": True,
+            "folder_is_tag": False,
+            "folder_special_use": ["inbox"],
+            "observation_count": 1,
+            "real_inbox_candidate": False,
+        },
+        {
+            "account_id": "account1",
+            "folder_id": "real-inbox",
+            "folder_path": "/Inbox",
+            "folder_is_unified": False,
+            "folder_is_virtual": False,
+            "folder_is_tag": False,
+            "folder_special_use": ["inbox"],
+            "observation_count": 1,
+            "real_inbox_candidate": True,
+        },
+    ]
+
+
 def test_key_probe_compares_latest_runs_by_stable_identity() -> None:
     client = TestClient(create_app())
     first_run = {

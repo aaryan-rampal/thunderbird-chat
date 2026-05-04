@@ -202,6 +202,26 @@ class KeyProbeRunComparison(BaseModel):
     fallback_identity_match_count: int
 
 
+class KeyProbeFolderSummary(BaseModel):
+    """Observed folder classification details from a key probe run."""
+
+    account_id: str
+    folder_id: str
+    folder_path: str
+    folder_is_unified: bool | None
+    folder_is_virtual: bool | None
+    folder_is_tag: bool | None
+    folder_special_use: list[str]
+    observation_count: int
+    real_inbox_candidate: bool
+
+
+class KeyProbeFolderSummaryList(BaseModel):
+    """Container for key probe folder classification summaries."""
+
+    folders: list[KeyProbeFolderSummary]
+
+
 class MessageStore:
     """In-memory storage for captured bridge messages."""
 
@@ -508,6 +528,59 @@ def compare_key_probe_runs(
     )
 
 
+def is_real_inbox_candidate(observation: KeyProbeObservation) -> bool:
+    """Return whether an observed folder looks like a real account inbox.
+
+    Args:
+        observation: Probe observation with folder classification fields.
+
+    Returns:
+        True when the folder is an inbox and not an aggregate/virtual/tag view.
+    """
+    special_uses = {special_use.lower() for special_use in observation.folder_special_use}
+    return (
+        "inbox" in special_uses
+        and observation.folder_is_unified is not True
+        and observation.folder_is_virtual is not True
+        and observation.folder_is_tag is not True
+    )
+
+
+def summarize_key_probe_folders(
+    observations: list[KeyProbeObservation],
+) -> list[KeyProbeFolderSummary]:
+    """Summarize folder classifications from key probe observations.
+
+    Args:
+        observations: Observations collected from Thunderbird folders.
+
+    Returns:
+        Stable list of observed folder summaries sorted by account and path.
+    """
+    folders: dict[tuple[str, str], KeyProbeFolderSummary] = {}
+    for observation in observations:
+        key = (observation.account_id, observation.folder_id)
+        current = folders.get(key)
+        if current is None:
+            folders[key] = KeyProbeFolderSummary(
+                account_id=observation.account_id,
+                folder_id=observation.folder_id,
+                folder_path=observation.folder_path,
+                folder_is_unified=observation.folder_is_unified,
+                folder_is_virtual=observation.folder_is_virtual,
+                folder_is_tag=observation.folder_is_tag,
+                folder_special_use=observation.folder_special_use,
+                observation_count=1,
+                real_inbox_candidate=is_real_inbox_candidate(observation),
+            )
+            continue
+        current.observation_count += 1
+    return sorted(
+        folders.values(),
+        key=lambda folder: (folder.account_id, folder.folder_path, folder.folder_id),
+    )
+
+
 def log_observed_bridge_event(event: ObservedBridgeEvent) -> None:
     """Log a normalized bridge event for server-side troubleshooting."""
     LOGGER.info(
@@ -612,6 +685,20 @@ def register_key_probe_routes(app: FastAPI, key_probe_store: KeyProbeRunStore) -
                 detail="No key probe runs have been received.",
             )
         return latest.summary
+
+    @app.get("/eda/key-probe/runs/latest/folders")
+    def latest_key_probe_run_folders(response: Response) -> KeyProbeFolderSummaryList:
+        """Return observed folder classifications for the latest key probe run."""
+        response.headers["Cache-Control"] = "no-store"
+        latest = key_probe_store.latest()
+        if latest is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No key probe runs have been received.",
+            )
+        return KeyProbeFolderSummaryList(
+            folders=summarize_key_probe_folders(latest.observations)
+        )
 
     @app.get("/eda/key-probe/runs/compare-latest")
     def compare_latest_key_probe_runs(response: Response) -> KeyProbeRunComparison:
